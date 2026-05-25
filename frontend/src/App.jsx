@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 
-const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:8000";
+const API_BASE = import.meta.env.VITE_API_URL ?? "";
 
 const AGENTS = [
   { id: "agent4", name: "Context Manager",     icon: "🗂️",  desc: "ดึง context + Glossary" },
