@@ -120,6 +120,10 @@ body {
 .upload-icon { font-size: 18px; }
 .upload-zone u { color: var(--accent-2); }
 
+.folder-zone { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.folder-btn { display: inline-flex; align-items: center; justify-content: center; cursor: pointer; }
+.batch-summary { font-size: 12px; color: var(--text-3); }
+
 .chapter-textarea {
   width: 100%; height: 240px; resize: vertical;
   background: var(--bg-3); border: 1px solid var(--border);
@@ -159,6 +163,8 @@ body {
 .btn-primary:disabled { opacity: 0.4; cursor: not-allowed; }
 .btn-primary.running { background: var(--bg-3); color: var(--text-2); }
 .btn-primary.sm { width: auto; padding: 6px 14px; font-size: 13px; }
+.btn-secondary { background: var(--bg-3); color: var(--text); border: 1px solid var(--border-2); }
+.btn-secondary:hover:not(:disabled) { border-color: var(--accent); background: var(--accent-bg); }
 
 .btn-ghost {
   padding: 6px 12px; border-radius: 6px;
@@ -256,6 +262,34 @@ body {
   font-size: 11px; color: var(--text-2);
   font-family: var(--font-mono); line-height: 1.8;
 }
+
+.batch-list {
+  margin-top: 12px; display: flex; flex-direction: column; gap: 6px;
+  max-height: 210px; overflow-y: auto;
+}
+.batch-row {
+  display: grid; grid-template-columns: 42px 1fr 70px; gap: 8px; align-items: center;
+  min-height: 34px; padding: 7px 10px; border-radius: 7px;
+  background: var(--bg-3); border: 1px solid var(--border);
+}
+.batch-index {
+  font-size: 11px; font-weight: 700; color: var(--text-3);
+  font-family: var(--font-mono);
+}
+.batch-name {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 12px; color: var(--text-2);
+}
+.batch-state {
+  display: flex; justify-content: flex-end; color: var(--text-3);
+  font-size: 11px; font-weight: 600;
+}
+.batch-running { border-color: var(--accent); background: var(--accent-bg); }
+.batch-running .batch-state { color: var(--accent-2); }
+.batch-done { border-color: rgba(52,211,153,0.3); background: var(--green-bg); }
+.batch-done .batch-state { color: var(--green); }
+.batch-error { border-color: rgba(248,113,113,0.35); background: var(--red-bg); }
+.batch-error .batch-state { color: var(--red); }
 
 /* ── Result ──────────────────────────────────────────────────── */
 .result-text {

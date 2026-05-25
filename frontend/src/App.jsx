@@ -19,6 +19,10 @@ export default function App() {
   const [apiKeys, setApiKeys] = useState([""]);
   const [chapterNum, setChapterNum] = useState(1);
   const [chapterText, setChapterText] = useState("");
+  const [batchFiles, setBatchFiles] = useState([]);
+  const [batchRunning, setBatchRunning] = useState(false);
+  const [currentBatchIndex, setCurrentBatchIndex] = useState(-1);
+  const [batchResults, setBatchResults] = useState([]);
   const [jobId, setJobId] = useState(null);
   const [jobStatus, setJobStatus] = useState("idle"); // idle|running|done|error
   const [agentStates, setAgentStates] = useState({});
@@ -31,6 +35,9 @@ export default function App() {
   const [copied, setCopied] = useState(false);
   const logsRef = useRef(null);
   const esRef = useRef(null);
+  const batchQueueRef = useRef([]);
+  const batchRunningRef = useRef(false);
+  const currentBatchIndexRef = useRef(-1);
 
   // Load glossary on mount & tab change
   useEffect(() => {
@@ -58,6 +65,15 @@ export default function App() {
     const keys = apiKeys.filter(k => k.trim());
     if (!keys.length) return;
 
+    setBatchRunning(false);
+    batchRunningRef.current = false;
+    setCurrentBatchIndex(-1);
+    currentBatchIndexRef.current = -1;
+    setBatchResults([]);
+    await startJob(chapterText, chapterNum, keys);
+  }
+
+  async function startJob(text, num, keys) {
     setJobStatus("running");
     setAgentStates({});
     setLogs([]);
@@ -68,7 +84,7 @@ export default function App() {
       const r = await fetch(`${API_BASE}/api/translate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ chapter_text: chapterText, chapter_num: chapterNum, api_keys: keys }),
+        body: JSON.stringify({ chapter_text: text, chapter_num: num, api_keys: keys }),
       });
       const { job_id } = await r.json();
       setJobId(job_id);
@@ -77,6 +93,41 @@ export default function App() {
       setJobStatus("error");
       setLogs(l => [...l, `❌ เชื่อมต่อ backend ไม่ได้: ${e.message}`]);
     }
+  }
+
+  async function startBatch() {
+    const keys = apiKeys.filter(k => k.trim());
+    if (!keys.length || !batchFiles.length) return;
+
+    batchRunningRef.current = true;
+    batchQueueRef.current = batchFiles;
+    currentBatchIndexRef.current = 0;
+    setBatchRunning(true);
+    setCurrentBatchIndex(0);
+    setBatchResults(batchFiles.map(f => ({ ...f, status: "queued" })));
+    await startBatchItem(0, keys);
+  }
+
+  async function startBatchItem(index, keys = apiKeys.filter(k => k.trim())) {
+    const item = batchQueueRef.current[index];
+    if (!item) {
+      batchRunningRef.current = false;
+      setBatchRunning(false);
+      setJobStatus("done");
+      setLogs(l => [...l, "✅ แปลครบทุกไฟล์ในโฟลเดอร์แล้ว"]);
+      fetchGlossary();
+      return;
+    }
+
+    currentBatchIndexRef.current = index;
+    setCurrentBatchIndex(index);
+    setChapterNum(item.chapterNum);
+    setChapterText(item.text);
+    setBatchResults(r => r.map((entry, i) => (
+      i === index ? { ...entry, status: "running" } : entry
+    )));
+    setLogs([`📚 เริ่มแปล ${item.name} เป็นตอนที่ ${item.chapterNum} (${index + 1}/${batchQueueRef.current.length})`]);
+    await startJob(item.text, item.chapterNum, keys);
   }
 
   function connectStream(id) {
@@ -104,14 +155,36 @@ export default function App() {
           setJobStatus("done");
           setResult(data);
           setKeyStatus(data.key_status || []);
-          setLogs(l => [...l, "✅ แปลเสร็จเรียบร้อย!"]);
+          setLogs(l => [...l, batchRunningRef.current ? "✅ ตอนนี้แปลเสร็จแล้ว" : "✅ แปลเสร็จเรียบร้อย!"]);
           AGENTS.forEach(a => setAgentStates(s => ({ ...s, [a.id]: "done" })));
           es.close();
           fetchGlossary();
+          if (batchRunningRef.current) {
+            const finishedIndex = currentBatchIndexRef.current;
+            setBatchResults(r => r.map((entry, i) => (
+              i === finishedIndex ? { ...entry, status: "done", result: data } : entry
+            )));
+            const nextIndex = finishedIndex + 1;
+            if (nextIndex < batchQueueRef.current.length) {
+              setTimeout(() => startBatchItem(nextIndex), 300);
+            } else {
+              batchRunningRef.current = false;
+              setBatchRunning(false);
+              setLogs(l => [...l, "✅ แปลครบทุกไฟล์ในโฟลเดอร์แล้ว"]);
+            }
+          }
         } else if (type === "error") {
           setJobStatus("error");
           setLogs(l => [...l, `❌ Error: ${data.message}`]);
           es.close();
+          if (batchRunningRef.current) {
+            const failedIndex = currentBatchIndexRef.current;
+            setBatchResults(r => r.map((entry, i) => (
+              i === failedIndex ? { ...entry, status: "error", error: data.message } : entry
+            )));
+            batchRunningRef.current = false;
+            setBatchRunning(false);
+          }
         }
       } catch {}
     };
@@ -124,6 +197,7 @@ export default function App() {
   }
 
   async function uploadFile(file) {
+    if (!file) return;
     const fd = new FormData();
     fd.append("file", file);
     try {
@@ -133,6 +207,31 @@ export default function App() {
       setLogs(l => [...l, `📁 โหลดไฟล์ ${d.filename} สำเร็จ (${d.size} bytes)`]);
     } catch (e) {
       setLogs(l => [...l, `❌ โหลดไฟล์ล้มเหลว: ${e.message}`]);
+    }
+  }
+
+  async function uploadFolder(files) {
+    const selected = Array.from(files || [])
+      .filter(file => /\.(txt|md)$/i.test(file.name))
+      .sort((a, b) => (a.webkitRelativePath || a.name).localeCompare(b.webkitRelativePath || b.name, undefined, { numeric: true }));
+
+    const firstChapter = Number(chapterNum) || 1;
+    const loaded = await Promise.all(selected.map(async (file, index) => ({
+      name: file.webkitRelativePath || file.name,
+      chapterNum: firstChapter + index,
+      text: await file.text(),
+      size: file.size,
+      status: "queued",
+    })));
+
+    batchQueueRef.current = loaded;
+    setBatchFiles(loaded);
+    setBatchResults(loaded);
+    if (loaded[0]) {
+      setChapterText(loaded[0].text);
+      setLogs(l => [...l, `📁 โหลดโฟลเดอร์สำเร็จ ${loaded.length} ไฟล์ เริ่มจากตอนที่ ${firstChapter}`]);
+    } else {
+      setLogs(l => [...l, "⚠️ ไม่พบไฟล์ .txt หรือ .md ในโฟลเดอร์"]);
     }
   }
 
@@ -233,6 +332,24 @@ export default function App() {
                 </label>
               </div>
 
+              <div className="folder-zone">
+                <input
+                  type="file"
+                  id="folderup"
+                  hidden
+                  multiple
+                  webkitdirectory=""
+                  directory=""
+                  onChange={e => uploadFolder(e.target.files)}
+                />
+                <label htmlFor="folderup" className="btn-ghost folder-btn">📂 เลือกโฟลเดอร์สำหรับแปลอัตโนมัติ</label>
+                {batchFiles.length > 0 && (
+                  <div className="batch-summary">
+                    {batchFiles.length} ไฟล์ · ตอนที่ {batchFiles[0].chapterNum}-{batchFiles[batchFiles.length - 1].chapterNum}
+                  </div>
+                )}
+              </div>
+
               <textarea
                 className="chapter-textarea"
                 placeholder="วางเนื้อหาต้นฉบับที่นี่..."
@@ -272,6 +389,16 @@ export default function App() {
                 {jobStatus === "running" ? (
                   <><span className="spinner" /> กำลังแปล...</>
                 ) : "▶ เริ่มแปล"}
+              </button>
+
+              <button
+                className={`btn-primary btn-secondary ${batchRunning ? "running" : ""}`}
+                onClick={startBatch}
+                disabled={jobStatus === "running" || batchRunning || !batchFiles.length}
+              >
+                {batchRunning ? (
+                  <><span className="spinner" /> แปลอัตโนมัติ {currentBatchIndex + 1}/{batchFiles.length}</>
+                ) : "▶ แปลทั้งโฟลเดอร์ทีละตอน"}
               </button>
             </div>
 
@@ -323,13 +450,30 @@ export default function App() {
                     {logs.map((l, i) => <div key={i} className="log-line">{l}</div>)}
                   </div>
                 )}
+
+                {batchResults.length > 0 && (
+                  <div className="batch-list">
+                    {batchResults.map((item, i) => (
+                      <div key={`${item.name}-${i}`} className={`batch-row batch-${item.status || "queued"}`}>
+                        <span className="batch-index">{item.chapterNum}</span>
+                        <span className="batch-name">{item.name}</span>
+                        <span className="batch-state">
+                          {item.status === "running" && <span className="spinner-sm" />}
+                          {item.status === "done" && "✓"}
+                          {item.status === "error" && "ผิดพลาด"}
+                          {(!item.status || item.status === "queued") && "รอ"}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
 
               {/* Result */}
               {result && (
                 <div className="panel result-panel">
                   <div className="panel-header">
-                    <h2>ผลลัพธ์การแปล — ตอนที่ {chapterNum}</h2>
+                    <h2>ผลลัพธ์การแปล — ตอนที่ {batchRunning || currentBatchIndex >= 0 ? batchFiles[currentBatchIndex]?.chapterNum || chapterNum : chapterNum}</h2>
                     <button className="btn-ghost" onClick={copyResult}>
                       {copied ? "✓ คัดลอกแล้ว" : "📋 คัดลอก"}
                     </button>
