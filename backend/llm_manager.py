@@ -9,7 +9,7 @@ import random
 import logging
 from dataclasses import dataclass
 from collections import defaultdict
-from langchain_google_genai import ChatGoogleGenerativeAI
+from crewai import LLM
 
 logging.basicConfig(level=logging.INFO, format="[%(asctime)s] %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -27,7 +27,7 @@ class KeyConfig:
 
 class LLMManager:
     PRIMARY_MODEL  = "gemini-2.0-flash-lite"
-    FALLBACK_MODEL = "gemma-3-27b-it"
+    FALLBACK_MODEL = "gemini-1.5-flash"
     RPM_LIMIT      = 15
     COOLDOWN_SEC   = 65
     MAX_RETRIES    = 5
@@ -44,7 +44,7 @@ class LLMManager:
 
     # ── Public ──────────────────────────────────────────────────────────
 
-    def get_llm(self, agent_role: str = "", use_fallback: bool = False) -> ChatGoogleGenerativeAI:
+    def get_llm(self, agent_role: str = "", use_fallback: bool = False) -> LLM:
         """ดึง LLM instance พร้อม key ที่ว่างอยู่"""
         key_cfg = self._pick_available_key()
         model = self.FALLBACK_MODEL if use_fallback else self.PRIMARY_MODEL
@@ -133,10 +133,11 @@ class LLMManager:
     def _track_rpm(self, key_cfg: KeyConfig) -> None:
         self._rpm_tracker[key_cfg.label].append(time.time())
 
-    def _build_llm(self, api_key: str, model: str) -> ChatGoogleGenerativeAI:
-        return ChatGoogleGenerativeAI(
-            model=model,
-            google_api_key=api_key,
+    def _build_llm(self, api_key: str, model: str) -> LLM:
+        litellm_model = model if "/" in model else f"gemini/{model}"
+        return LLM(
+            model=litellm_model,
+            api_key=api_key,
             temperature=0.3,
             max_retries=0,
         )
