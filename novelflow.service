@@ -1,0 +1,17 @@
+[Unit]
+Description=NovelFlow FastAPI Backend
+After=network.target
+
+[Service]
+User=www-data
+WorkingDirectory=/var/www/novel-translation/backend
+Environment="PATH=/var/www/novel-translation/venv/bin"
+ExecStart=/var/www/novel-translation/venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000 --workers 1
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
