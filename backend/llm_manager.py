@@ -26,7 +26,7 @@ class KeyConfig:
 
 
 class LLMManager:
-    PRIMARY_MODEL  = "gemini-2.0-flash-lite"
+    PRIMARY_MODEL  = "gemini-3.1-flash-lite"
     FALLBACK_MODEL = "gemini-1.5-flash"
     RPM_LIMIT      = 15
     COOLDOWN_SEC   = 65
