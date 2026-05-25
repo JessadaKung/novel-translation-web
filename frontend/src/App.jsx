@@ -35,6 +35,7 @@ export default function App() {
   const [copied, setCopied] = useState(false);
   const logsRef = useRef(null);
   const esRef = useRef(null);
+  const folderInputRef = useRef(null);
   const batchQueueRef = useRef([]);
   const batchRunningRef = useRef(false);
   const currentBatchIndexRef = useRef(-1);
@@ -43,6 +44,13 @@ export default function App() {
   useEffect(() => {
     if (tab === "glossary") fetchGlossary();
   }, [tab]);
+
+  useEffect(() => {
+    if (folderInputRef.current) {
+      folderInputRef.current.setAttribute("webkitdirectory", "");
+      folderInputRef.current.setAttribute("directory", "");
+    }
+  }, []);
 
   async function fetchGlossary() {
     setGlossaryLoading(true);
@@ -210,7 +218,7 @@ export default function App() {
     }
   }
 
-  async function uploadFolder(files) {
+  async function uploadFiles(files, sourceLabel = "ไฟล์") {
     const selected = Array.from(files || [])
       .filter(file => /\.(txt|md)$/i.test(file.name))
       .sort((a, b) => (a.webkitRelativePath || a.name).localeCompare(b.webkitRelativePath || b.name, undefined, { numeric: true }));
@@ -229,10 +237,71 @@ export default function App() {
     setBatchResults(loaded);
     if (loaded[0]) {
       setChapterText(loaded[0].text);
-      setLogs(l => [...l, `📁 โหลดโฟลเดอร์สำเร็จ ${loaded.length} ไฟล์ เริ่มจากตอนที่ ${firstChapter}`]);
+      setLogs(l => [...l, `📁 โหลด${sourceLabel}สำเร็จ ${loaded.length} ไฟล์ เริ่มจากตอนที่ ${firstChapter}`]);
     } else {
-      setLogs(l => [...l, "⚠️ ไม่พบไฟล์ .txt หรือ .md ในโฟลเดอร์"]);
+      setLogs(l => [...l, `⚠️ ไม่พบไฟล์ .txt หรือ .md ใน${sourceLabel}`]);
     }
+  }
+
+  async function handleUploadSelection(files) {
+    const selected = Array.from(files || []).filter(file => /\.(txt|md)$/i.test(file.name));
+    if (selected.length <= 1) {
+      await uploadFile(selected[0]);
+      return;
+    }
+    await uploadFiles(selected, "หลายไฟล์");
+  }
+
+  function readEntryFile(fileEntry, pathPrefix = "") {
+    return new Promise((resolve, reject) => {
+      fileEntry.file(file => {
+        const path = `${pathPrefix}${file.name}`;
+        resolve({
+          name: file.name,
+          size: file.size,
+          webkitRelativePath: path,
+          text: () => file.text(),
+        });
+      }, reject);
+    });
+  }
+
+  async function readDirectoryEntry(directoryEntry, pathPrefix = "") {
+    const reader = directoryEntry.createReader();
+    const entries = [];
+
+    while (true) {
+      const batch = await new Promise((resolve, reject) => reader.readEntries(resolve, reject));
+      if (!batch.length) break;
+      entries.push(...batch);
+    }
+
+    const files = await Promise.all(entries.map(entry => {
+      const nextPrefix = `${pathPrefix}${directoryEntry.name}/`;
+      if (entry.isFile) return readEntryFile(entry, nextPrefix);
+      if (entry.isDirectory) return readDirectoryEntry(entry, nextPrefix);
+      return [];
+    }));
+
+    return files.flat();
+  }
+
+  async function handleDropFiles(event) {
+    event.preventDefault();
+    const items = Array.from(event.dataTransfer.items || []);
+    const entries = items.map(item => item.webkitGetAsEntry?.()).filter(Boolean);
+
+    if (entries.length) {
+      const files = (await Promise.all(entries.map(entry => {
+        if (entry.isFile) return readEntryFile(entry);
+        if (entry.isDirectory) return readDirectoryEntry(entry);
+        return [];
+      }))).flat();
+      await handleUploadSelection(files);
+      return;
+    }
+
+    await handleUploadSelection(event.dataTransfer.files);
   }
 
   async function deleteGlossaryEntry(type, key) {
@@ -324,23 +393,22 @@ export default function App() {
               </div>
 
               {/* Upload zone */}
-              <div className="upload-zone" onDrop={e => { e.preventDefault(); uploadFile(e.dataTransfer.files[0]); }} onDragOver={e => e.preventDefault()}>
-                <input type="file" accept=".txt,.md" id="fileup" hidden onChange={e => uploadFile(e.target.files[0])} />
+              <div className="upload-zone" onDrop={handleDropFiles} onDragOver={e => e.preventDefault()}>
+                <input type="file" accept=".txt,.md" id="fileup" hidden multiple onChange={e => handleUploadSelection(e.target.files)} />
                 <label htmlFor="fileup">
                   <span className="upload-icon">📄</span>
-                  <span>วาง หรือ <u>เลือกไฟล์</u> (.txt, .md)</span>
+                  <span>วางไฟล์/โฟลเดอร์ หรือ <u>เลือกหลายไฟล์</u> (.txt, .md)</span>
                 </label>
               </div>
 
               <div className="folder-zone">
                 <input
+                  ref={folderInputRef}
                   type="file"
                   id="folderup"
                   hidden
                   multiple
-                  webkitdirectory=""
-                  directory=""
-                  onChange={e => uploadFolder(e.target.files)}
+                  onChange={e => uploadFiles(e.target.files, "โฟลเดอร์")}
                 />
                 <label htmlFor="folderup" className="btn-ghost folder-btn">📂 เลือกโฟลเดอร์สำหรับแปลอัตโนมัติ</label>
                 {batchFiles.length > 0 && (
