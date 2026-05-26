@@ -117,6 +117,78 @@ def save_source_file(content: bytes, relative_path: str) -> dict:
     }
 
 
+def empty_glossary_data() -> dict:
+    return {"characters": {}, "places": {}, "terms": {}}
+
+
+def extract_section(raw: str, start_markers: list[str], end_markers: list[str]) -> str:
+    starts = []
+    for marker in start_markers:
+        match = re.search(re.escape(marker), raw, flags=re.IGNORECASE)
+        if match:
+            starts.append((match.end(), match.start()))
+    if not starts:
+        return ""
+
+    start, _ = min(starts, key=lambda item: item[1])
+    end = len(raw)
+    for marker in end_markers:
+        match = re.search(re.escape(marker), raw[start:], flags=re.IGNORECASE)
+        if match:
+            end = min(end, start + match.start())
+    return raw[start:end].strip()
+
+
+def parse_pipeline_output(raw: str) -> tuple[str, str, dict]:
+    glossary = parse_glossary_json(raw)
+    translation = extract_section(
+        raw,
+        ["FINAL_TRANSLATION:", "FINAL TRANSLATION:", "บทแปลฉบับสมบูรณ์:"],
+        ["CHAPTER_SUMMARY:", "CHAPTER SUMMARY:", "FINAL_GLOSSARY:", "FINAL GLOSSARY:", "สรุปตอน:", "Glossary:"],
+    )
+    summary = extract_section(
+        raw,
+        ["CHAPTER_SUMMARY:", "CHAPTER SUMMARY:", "สรุปตอน:"],
+        ["FINAL_GLOSSARY:", "FINAL GLOSSARY:", "Glossary:"],
+    )
+
+    if not translation:
+        translation = raw
+        for marker in ["CHAPTER_SUMMARY:", "CHAPTER SUMMARY:", "FINAL_GLOSSARY:", "FINAL GLOSSARY:", "สรุปตอน:", "Glossary:"]:
+            idx = translation.upper().find(marker.upper())
+            if idx >= 0:
+                translation = translation[:idx]
+                break
+
+    return translation.strip(), summary.strip(), glossary
+
+
+def parse_glossary_json(raw: str) -> dict:
+    glossary_section = extract_section(raw, ["FINAL_GLOSSARY:", "FINAL GLOSSARY:", "Glossary:"], [])
+    candidates = []
+    if glossary_section:
+        candidates.append(glossary_section)
+    candidates.extend(re.findall(r"```(?:json)?\s*([\s\S]*?)```", raw, flags=re.IGNORECASE))
+    candidates.extend(re.findall(r'\{[\s\S]*?"characters"[\s\S]*?\}', raw))
+
+    for candidate in candidates:
+        text = candidate.strip()
+        start = text.find("{")
+        end = text.rfind("}")
+        if start < 0 or end < start:
+            continue
+        try:
+            data = json.loads(text[start:end + 1])
+        except Exception:
+            continue
+        return {
+            "characters": data.get("characters") or {},
+            "places": data.get("places") or {},
+            "terms": data.get("terms") or {},
+        }
+    return empty_glossary_data()
+
+
 def save_translation_output(
     chapter_num: int,
     translation: str,
@@ -292,13 +364,16 @@ def _run_translation_job(
         qa_task = Task(
             description=f"""
             ตรวจสอบรอบสุดท้ายตอนที่ {chapter_num}
+            ใช้ Glossary ที่ Agent 2 ยืนยันแล้วจาก context และส่งคืนในผลลัพธ์สุดท้ายด้วย
             ผลลัพธ์:
             FINAL_TRANSLATION:
             (บทแปลฉบับสมบูรณ์)
             CHAPTER_SUMMARY:
             (สรุปตอน 3-5 ประโยค)
+            FINAL_GLOSSARY:
+            {{"characters":{{}},"places":{{}},"terms":{{}}}}
             """,
-            expected_output="บทแปลสมบูรณ์ + สรุปตอน",
+            expected_output="บทแปลสมบูรณ์ + สรุปตอน + FINAL_GLOSSARY JSON",
             agent=qa_agent,
             context=[tone_task, glossary_task],
         )
@@ -338,30 +413,7 @@ def _run_translation_job(
         raw_result = manager.call_with_retry(crew.kickoff, agent_role=f"Chapter{chapter_num}")
         raw_str = str(raw_result)
 
-        # Parse output
-        translation = ""
-        summary = ""
-        if "FINAL_TRANSLATION:" in raw_str:
-            parts = raw_str.split("FINAL_TRANSLATION:")
-            rest = parts[1]
-            if "CHAPTER_SUMMARY:" in rest:
-                translation, summary = rest.split("CHAPTER_SUMMARY:")
-            else:
-                translation = rest
-        else:
-            translation = raw_str
-
-        translation = translation.strip()
-        summary = summary.strip()
-
-        # Parse glossary
-        new_glossary_data = {"characters": {}, "places": {}, "terms": {}}
-        try:
-            match = re.search(r'\{[\s\S]*"characters"[\s\S]*\}', raw_str)
-            if match:
-                new_glossary_data = json.loads(match.group())
-        except Exception:
-            pass
+        translation, summary, new_glossary_data = parse_pipeline_output(raw_str)
 
         # Update glossary DB
         glossary = merge_glossary(glossary, new_glossary_data)
