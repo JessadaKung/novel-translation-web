@@ -393,6 +393,12 @@ export default function App() {
     await handleUploadSelection(event.dataTransfer.files);
   }
 
+  function openSourceFile(item, index) {
+    setChapterText(item.text);
+    setChapterNum(item.chapterNum);
+    setCurrentBatchIndex(index);
+  }
+
   async function deleteGlossaryEntry(type, key) {
     await fetch(`${API_BASE}/api/glossary/${type}/${encodeURIComponent(key)}`, { method: "DELETE" });
     fetchGlossary();
@@ -506,6 +512,37 @@ export default function App() {
                   </div>
                 )}
               </div>
+
+              {batchFiles.length > 0 && (
+                <div className="source-manager">
+                  <div className="source-manager-header">
+                    <span>Source File Manager</span>
+                    <button
+                      className="btn-ghost-sm"
+                      onClick={() => {
+                        setBatchFiles([]);
+                        setBatchResults([]);
+                        batchQueueRef.current = [];
+                      }}
+                    >
+                      ล้าง
+                    </button>
+                  </div>
+                  <div className="source-list">
+                    {batchFiles.map((item, index) => (
+                      <button
+                        key={`${item.name}-${index}`}
+                        className={`source-row ${chapterNum === item.chapterNum ? "active" : ""}`}
+                        onClick={() => openSourceFile(item, index)}
+                      >
+                        <span className="source-chapter">{item.chapterNum}</span>
+                        <span className="source-name">{item.name}</span>
+                        <span className="source-size">{Math.ceil(item.size / 1024)} KB</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
 
               <div className="output-folder-control">
                 <label>Output folder</label>
