@@ -2,6 +2,9 @@ import { useState, useEffect, useRef, useCallback } from "react";
 
 const API_BASE = import.meta.env.VITE_API_URL ?? "";
 const STORAGE_KEY = "novelflow.translateState.v1";
+const SOURCE_DB_NAME = "novelflow-source-files";
+const SOURCE_DB_VERSION = 1;
+const SOURCE_STORE = "batchFiles";
 
 const AGENTS = [
   { id: "agent4", name: "Context Manager",     icon: "🗂️",  desc: "ดึง context + Glossary" },
@@ -21,7 +24,7 @@ export default function App() {
   const [apiKeys, setApiKeys] = useState(savedState.apiKeys?.length ? savedState.apiKeys : [""]);
   const [chapterNum, setChapterNum] = useState(savedState.chapterNum || 1);
   const [chapterText, setChapterText] = useState(savedState.chapterText || "");
-  const [batchFiles, setBatchFiles] = useState([]);
+  const [batchFiles, setBatchFiles] = useState(savedState.batchFiles || []);
   const [outputFolder, setOutputFolder] = useState(savedState.outputFolder || "translated");
   const [outputFiles, setOutputFiles] = useState([]);
   const [selectedOutput, setSelectedOutput] = useState(savedState.selectedOutput || null);
@@ -47,6 +50,10 @@ export default function App() {
   const currentBatchIndexRef = useRef(-1);
   const hasRestoredJobRef = useRef(false);
 
+  useEffect(() => {
+    batchQueueRef.current = batchFiles;
+  }, [batchFiles]);
+
   // Load glossary on mount & tab change
   useEffect(() => {
     if (tab === "glossary") fetchGlossary();
@@ -61,11 +68,32 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    restoreSavedBatchFiles();
+  }, []);
+
+  async function restoreSavedBatchFiles() {
+    try {
+      const savedBatch = await loadBatchFilesFromDb();
+      if (!savedBatch.length) return;
+      setBatchFiles(savedBatch);
+      setBatchResults(savedBatch.map(file => ({ ...file, status: file.status || "queued" })));
+      batchQueueRef.current = savedBatch;
+      if (!chapterText && savedBatch[0]) {
+        setChapterText(savedBatch[0].text);
+        setChapterNum(savedBatch[0].chapterNum);
+      }
+    } catch (e) {
+      setLogs(l => [...l, `⚠️ โหลดรายการไฟล์เดิมไม่ได้: ${e.message}`]);
+    }
+  }
+
+  useEffect(() => {
     const state = {
       tab,
       apiKeys,
       chapterNum,
       chapterText,
+      batchFiles: toPersistableBatchFiles(batchFiles),
       outputFolder,
       jobId,
       jobStatus,
@@ -77,7 +105,7 @@ export default function App() {
       savedAt: Date.now(),
     };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-  }, [tab, apiKeys, chapterNum, chapterText, outputFolder, jobId, jobStatus, agentStates, logs, result, keyStatus, selectedOutput]);
+  }, [tab, apiKeys, chapterNum, chapterText, batchFiles, outputFolder, jobId, jobStatus, agentStates, logs, result, keyStatus, selectedOutput]);
 
   useEffect(() => {
     if (!jobId || hasRestoredJobRef.current) return;
@@ -324,6 +352,9 @@ export default function App() {
     batchQueueRef.current = loaded;
     setBatchFiles(loaded);
     setBatchResults(loaded);
+    saveBatchFilesToDb(loaded).catch(e => {
+      setLogs(l => [...l, `⚠️ บันทึกรายการไฟล์ไว้ใช้ต่อหลัง reload ไม่ได้: ${e.message}`]);
+    });
     if (loaded[0]) {
       setChapterText(loaded[0].text);
       setLogs(l => [...l, `📁 โหลด${sourceLabel}สำเร็จ ${loaded.length} ไฟล์ เริ่มจากตอนที่ ${firstChapter}`]);
@@ -523,6 +554,9 @@ export default function App() {
                         setBatchFiles([]);
                         setBatchResults([]);
                         batchQueueRef.current = [];
+                        clearBatchFilesFromDb().catch(e => {
+                          setLogs(l => [...l, `⚠️ ล้างรายการไฟล์เดิมไม่สำเร็จ: ${e.message}`]);
+                        });
                       }}
                     >
                       ล้าง
@@ -919,4 +953,80 @@ function loadSavedState() {
   } catch {
     return {};
   }
+}
+
+function toPersistableBatchFiles(files) {
+  return (files || []).map(({ name, chapterNum, size, status }) => ({
+    name,
+    chapterNum,
+    size,
+    status: status || "queued",
+  }));
+}
+
+function openSourceDb() {
+  return new Promise((resolve, reject) => {
+    if (!("indexedDB" in window)) {
+      reject(new Error("เบราว์เซอร์นี้ไม่รองรับ IndexedDB"));
+      return;
+    }
+
+    const request = indexedDB.open(SOURCE_DB_NAME, SOURCE_DB_VERSION);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(SOURCE_STORE)) {
+        db.createObjectStore(SOURCE_STORE, { keyPath: "id" });
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error || new Error("เปิดฐานข้อมูลไฟล์ไม่ได้"));
+  });
+}
+
+async function loadBatchFilesFromDb() {
+  const db = await openSourceDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(SOURCE_STORE, "readonly");
+    const store = tx.objectStore(SOURCE_STORE);
+    const request = store.get("current");
+    request.onsuccess = () => resolve(request.result?.files || []);
+    request.onerror = () => reject(request.error || new Error("อ่านรายการไฟล์ไม่ได้"));
+    tx.oncomplete = () => db.close();
+    tx.onerror = () => {
+      db.close();
+      reject(tx.error || new Error("อ่านรายการไฟล์ไม่ได้"));
+    };
+  });
+}
+
+async function saveBatchFilesToDb(files) {
+  const db = await openSourceDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(SOURCE_STORE, "readwrite");
+    tx.objectStore(SOURCE_STORE).put({ id: "current", files, savedAt: Date.now() });
+    tx.oncomplete = () => {
+      db.close();
+      resolve();
+    };
+    tx.onerror = () => {
+      db.close();
+      reject(tx.error || new Error("บันทึกรายการไฟล์ไม่ได้"));
+    };
+  });
+}
+
+async function clearBatchFilesFromDb() {
+  const db = await openSourceDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(SOURCE_STORE, "readwrite");
+    tx.objectStore(SOURCE_STORE).delete("current");
+    tx.oncomplete = () => {
+      db.close();
+      resolve();
+    };
+    tx.onerror = () => {
+      db.close();
+      reject(tx.error || new Error("ล้างรายการไฟล์ไม่ได้"));
+    };
+  });
 }
