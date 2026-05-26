@@ -41,6 +41,7 @@ export default function App() {
   const [glossary, setGlossary] = useState({ characters: {}, places: {}, terms: {}, chapter_summaries: [] });
   const [glossaryLoading, setGlossaryLoading] = useState(false);
   const [newEntry, setNewEntry] = useState({ type: "characters", en: "", th: "" });
+  const [editingEntry, setEditingEntry] = useState(null);
   const [copied, setCopied] = useState(false);
   const logsRef = useRef(null);
   const esRef = useRef(null);
@@ -452,7 +453,7 @@ export default function App() {
   }
 
   async function deleteGlossaryEntry(type, key) {
-    await fetch(`${API_BASE}/api/glossary/${type}/${encodeURIComponent(key)}`, { method: "DELETE" });
+    await fetch(`${API_BASE}/api/glossary/${glossaryRouteType(type)}/${encodeURIComponent(key)}`, { method: "DELETE" });
     fetchGlossary();
   }
 
@@ -463,8 +464,17 @@ export default function App() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ [newEntry.type]: { [newEntry.en]: newEntry.th } }),
     });
+    if (editingEntry && (editingEntry.type !== newEntry.type || editingEntry.en !== newEntry.en)) {
+      await fetch(`${API_BASE}/api/glossary/${glossaryRouteType(editingEntry.type)}/${encodeURIComponent(editingEntry.en)}`, { method: "DELETE" });
+    }
     setNewEntry(e => ({ ...e, en: "", th: "" }));
+    setEditingEntry(null);
     fetchGlossary();
+  }
+
+  function editGlossaryEntry(type, en, th) {
+    setNewEntry({ type, en, th });
+    setEditingEntry({ type, en });
   }
 
   async function clearGlossary() {
@@ -821,8 +831,8 @@ export default function App() {
         {/* ─── GLOSSARY TAB ─── */}
         {tab === "glossary" && (
           <div className="glossary-layout">
-            <div className="panel-header sticky-header">
-              <h2>Glossary Database</h2>
+            <div className="glossary-titlebar">
+              <h2>Glossary</h2>
               <div className="header-actions">
                 <button className="btn-ghost" onClick={fetchGlossary}>🔄 รีเฟรช</button>
                 <button className="btn-ghost danger" onClick={clearGlossary}>🗑️ ล้างทั้งหมด</button>
@@ -830,30 +840,50 @@ export default function App() {
             </div>
 
             {/* Add entry */}
-            <div className="panel add-entry-panel">
-              <h3>➕ เพิ่ม Entry ใหม่</h3>
+            <div className="add-entry-panel">
+              <h3>{editingEntry ? "✎ แก้ไข Entry" : "+ เพิ่ม Entry ใหม่"}</h3>
               <div className="add-row">
                 <select value={newEntry.type} onChange={e => setNewEntry(n => ({ ...n, type: e.target.value }))}>
                   <option value="characters">ตัวละคร</option>
                   <option value="places">สถานที่</option>
                   <option value="terms">คำศัพท์</option>
                 </select>
-                <input placeholder="EN" value={newEntry.en} onChange={e => setNewEntry(n => ({ ...n, en: e.target.value }))} />
+                <input placeholder="ต้นฉบับ" value={newEntry.en} onChange={e => setNewEntry(n => ({ ...n, en: e.target.value }))} />
                 <span className="arrow-label">→</span>
-                <input placeholder="TH" value={newEntry.th} onChange={e => setNewEntry(n => ({ ...n, th: e.target.value }))} />
-                <button className="btn-primary sm" onClick={addGlossaryEntry}>เพิ่ม</button>
+                <input placeholder="คำไทย" value={newEntry.th} onChange={e => setNewEntry(n => ({ ...n, th: e.target.value }))} />
+                <button className="btn-primary sm" onClick={addGlossaryEntry}>{editingEntry ? "บันทึก" : "เพิ่ม"}</button>
+                {editingEntry && (
+                  <button
+                    className="btn-ghost"
+                    onClick={() => {
+                      setEditingEntry(null);
+                      setNewEntry({ type: "characters", en: "", th: "" });
+                    }}
+                  >
+                    ยกเลิก
+                  </button>
+                )}
               </div>
             </div>
 
-            <div className="glossary-tables">
+            <div className="glossary-sections">
               {[
                 { key: "characters", label: "👤 ตัวละคร", color: "purple" },
                 { key: "places", label: "📍 สถานที่", color: "teal" },
                 { key: "terms", label: "💬 คำศัพท์", color: "amber" },
               ].map(({ key, label, color }) => (
-                <div key={key} className={`panel glossary-cat cat-${color}`}>
+                <section key={key} className={`glossary-cat cat-${color}`}>
                   <div className="cat-header">
                     <span className="cat-title">{label}</span>
+                    <button
+                      className="btn-ghost-sm"
+                      onClick={() => {
+                        setNewEntry({ type: key, en: "", th: "" });
+                        setEditingEntry(null);
+                      }}
+                    >
+                      + เพิ่ม
+                    </button>
                     <span className="cat-count">{Object.keys(glossary[key] || {}).length} entries</span>
                   </div>
                   {glossaryLoading ? (
@@ -861,26 +891,25 @@ export default function App() {
                   ) : Object.keys(glossary[key] || {}).length === 0 ? (
                     <div className="empty">ยังไม่มีข้อมูล</div>
                   ) : (
-                    <table className="glossary-table">
-                      <thead><tr><th>EN</th><th>TH</th><th></th></tr></thead>
-                      <tbody>
-                        {Object.entries(glossary[key] || {}).map(([en, th]) => (
-                          <tr key={en}>
-                            <td className="en-cell">{en}</td>
-                            <td className="th-cell">{th}</td>
-                            <td>
-                              <button className="btn-delete" onClick={() => deleteGlossaryEntry(key, en)}>✕</button>
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
+                    <div className="glossary-list">
+                      {Object.entries(glossary[key] || {}).map(([en, th]) => (
+                        <div className="glossary-row" key={en}>
+                          <span className="glossary-source">{en}</span>
+                          <span className="glossary-arrow">→</span>
+                          <strong className="glossary-target">{th}</strong>
+                          <div className="glossary-actions">
+                            <button className="icon-btn" title="แก้ไข" onClick={() => editGlossaryEntry(key, en, th)}>✎</button>
+                            <button className="icon-btn danger" title="ลบ" onClick={() => deleteGlossaryEntry(key, en)}>🗑</button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
                   )}
-                </div>
+                </section>
               ))}
 
               {/* Chapter Summaries */}
-              <div className="panel glossary-cat cat-gray" style={{ gridColumn: "1 / -1" }}>
+              <section className="glossary-cat cat-gray">
                 <div className="cat-header">
                   <span className="cat-title">📖 สรุปตอน</span>
                   <span className="cat-count">{(glossary.chapter_summaries || []).length} ตอน</span>
@@ -900,7 +929,7 @@ export default function App() {
                     ))}
                   </div>
                 )}
-              </div>
+              </section>
             </div>
           </div>
         )}
@@ -974,6 +1003,10 @@ function loadSavedState() {
   } catch {
     return {};
   }
+}
+
+function glossaryRouteType(type) {
+  return ({ characters: "character", places: "place", terms: "term" })[type] || type;
 }
 
 function toPersistableBatchFiles(files) {
