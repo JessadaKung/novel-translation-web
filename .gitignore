@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+node_modules/
+dist/
+
+backend/outputs/
+backend/glossary_db.json

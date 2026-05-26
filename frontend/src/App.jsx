@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 
 const API_BASE = import.meta.env.VITE_API_URL ?? "";
+const STORAGE_KEY = "novelflow.translateState.v1";
 
 const AGENTS = [
   { id: "agent4", name: "Context Manager",     icon: "🗂️",  desc: "ดึง context + Glossary" },
@@ -15,20 +16,25 @@ const AGENTS = [
 const TABS = ["translate", "glossary", "keys"];
 
 export default function App() {
-  const [tab, setTab] = useState("translate");
-  const [apiKeys, setApiKeys] = useState([""]);
-  const [chapterNum, setChapterNum] = useState(1);
-  const [chapterText, setChapterText] = useState("");
+  const savedState = loadSavedState();
+  const [tab, setTab] = useState(savedState.tab || "translate");
+  const [apiKeys, setApiKeys] = useState(savedState.apiKeys?.length ? savedState.apiKeys : [""]);
+  const [chapterNum, setChapterNum] = useState(savedState.chapterNum || 1);
+  const [chapterText, setChapterText] = useState(savedState.chapterText || "");
   const [batchFiles, setBatchFiles] = useState([]);
+  const [outputFolder, setOutputFolder] = useState(savedState.outputFolder || "translated");
+  const [outputFiles, setOutputFiles] = useState([]);
+  const [selectedOutput, setSelectedOutput] = useState(savedState.selectedOutput || null);
+  const [outputLoading, setOutputLoading] = useState(false);
   const [batchRunning, setBatchRunning] = useState(false);
   const [currentBatchIndex, setCurrentBatchIndex] = useState(-1);
   const [batchResults, setBatchResults] = useState([]);
-  const [jobId, setJobId] = useState(null);
-  const [jobStatus, setJobStatus] = useState("idle"); // idle|running|done|error
-  const [agentStates, setAgentStates] = useState({});
-  const [logs, setLogs] = useState([]);
-  const [result, setResult] = useState(null);
-  const [keyStatus, setKeyStatus] = useState([]);
+  const [jobId, setJobId] = useState(savedState.jobId || null);
+  const [jobStatus, setJobStatus] = useState(savedState.jobStatus || "idle"); // idle|running|done|error
+  const [agentStates, setAgentStates] = useState(savedState.agentStates || {});
+  const [logs, setLogs] = useState(savedState.logs || []);
+  const [result, setResult] = useState(savedState.result || null);
+  const [keyStatus, setKeyStatus] = useState(savedState.keyStatus || []);
   const [glossary, setGlossary] = useState({ characters: {}, places: {}, terms: {}, chapter_summaries: [] });
   const [glossaryLoading, setGlossaryLoading] = useState(false);
   const [newEntry, setNewEntry] = useState({ type: "characters", en: "", th: "" });
@@ -39,10 +45,12 @@ export default function App() {
   const batchQueueRef = useRef([]);
   const batchRunningRef = useRef(false);
   const currentBatchIndexRef = useRef(-1);
+  const hasRestoredJobRef = useRef(false);
 
   // Load glossary on mount & tab change
   useEffect(() => {
     if (tab === "glossary") fetchGlossary();
+    if (tab === "translate") fetchOutputFiles();
   }, [tab]);
 
   useEffect(() => {
@@ -50,6 +58,37 @@ export default function App() {
       folderInputRef.current.setAttribute("webkitdirectory", "");
       folderInputRef.current.setAttribute("directory", "");
     }
+  }, []);
+
+  useEffect(() => {
+    const state = {
+      tab,
+      apiKeys,
+      chapterNum,
+      chapterText,
+      outputFolder,
+      jobId,
+      jobStatus,
+      agentStates,
+      logs: logs.slice(-200),
+      result,
+      keyStatus,
+      selectedOutput,
+      savedAt: Date.now(),
+    };
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  }, [tab, apiKeys, chapterNum, chapterText, outputFolder, jobId, jobStatus, agentStates, logs, result, keyStatus, selectedOutput]);
+
+  useEffect(() => {
+    if (!jobId || hasRestoredJobRef.current) return;
+    hasRestoredJobRef.current = true;
+    restoreJob(jobId);
+  }, [jobId]);
+
+  useEffect(() => {
+    return () => {
+      if (esRef.current) esRef.current.close();
+    };
   }, []);
 
   async function fetchGlossary() {
@@ -60,6 +99,49 @@ export default function App() {
       setGlossary(d);
     } catch {}
     setGlossaryLoading(false);
+  }
+
+  async function fetchOutputFiles() {
+    setOutputLoading(true);
+    try {
+      const r = await fetch(`${API_BASE}/api/files`);
+      const d = await r.json();
+      setOutputFiles(d.folders || []);
+    } catch {}
+    setOutputLoading(false);
+  }
+
+  async function restoreJob(id) {
+    try {
+      const r = await fetch(`${API_BASE}/api/translate/${id}`);
+      if (!r.ok) return;
+      const job = await r.json();
+      if (job.status === "running" || job.status === "pending") {
+        setJobStatus("running");
+        setLogs(l => [...l, "↻ เชื่อมต่อ job เดิมหลัง reload..."]);
+        connectStream(id);
+      } else if (job.status === "done") {
+        setJobStatus("done");
+        setResult(job.result);
+        if (job.result?.key_status) setKeyStatus(job.result.key_status);
+        fetchOutputFiles();
+      } else if (job.status === "error") {
+        setJobStatus("error");
+        setLogs(l => [...l, `❌ Job เดิมผิดพลาด: ${job.error}`]);
+      }
+    } catch {}
+  }
+
+  async function openOutputFile(file) {
+    try {
+      const [folder, ...rest] = file.relative_path.split("/");
+      const filename = rest.join("/");
+      const r = await fetch(`${API_BASE}/api/files/${encodeURIComponent(folder)}/${encodeURIComponent(filename)}`);
+      const text = await r.text();
+      setSelectedOutput({ ...file, text });
+    } catch (e) {
+      setLogs(l => [...l, `❌ เปิดไฟล์ output ไม่ได้: ${e.message}`]);
+    }
   }
 
   // Auto-scroll logs
@@ -78,10 +160,10 @@ export default function App() {
     setCurrentBatchIndex(-1);
     currentBatchIndexRef.current = -1;
     setBatchResults([]);
-    await startJob(chapterText, chapterNum, keys);
+    await startJob(chapterText, chapterNum, keys, null);
   }
 
-  async function startJob(text, num, keys) {
+  async function startJob(text, num, keys, sourceName = null) {
     setJobStatus("running");
     setAgentStates({});
     setLogs([]);
@@ -92,7 +174,13 @@ export default function App() {
       const r = await fetch(`${API_BASE}/api/translate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ chapter_text: text, chapter_num: num, api_keys: keys }),
+        body: JSON.stringify({
+          chapter_text: text,
+          chapter_num: num,
+          api_keys: keys,
+          output_folder: outputFolder,
+          source_name: sourceName,
+        }),
       });
       const { job_id } = await r.json();
       setJobId(job_id);
@@ -135,7 +223,7 @@ export default function App() {
       i === index ? { ...entry, status: "running" } : entry
     )));
     setLogs([`📚 เริ่มแปล ${item.name} เป็นตอนที่ ${item.chapterNum} (${index + 1}/${batchQueueRef.current.length})`]);
-    await startJob(item.text, item.chapterNum, keys);
+    await startJob(item.text, item.chapterNum, keys, item.name);
   }
 
   function connectStream(id) {
@@ -167,6 +255,7 @@ export default function App() {
           AGENTS.forEach(a => setAgentStates(s => ({ ...s, [a.id]: "done" })));
           es.close();
           fetchGlossary();
+          fetchOutputFiles();
           if (batchRunningRef.current) {
             const finishedIndex = currentBatchIndexRef.current;
             setBatchResults(r => r.map((entry, i) => (
@@ -418,6 +507,15 @@ export default function App() {
                 )}
               </div>
 
+              <div className="output-folder-control">
+                <label>Output folder</label>
+                <input
+                  value={outputFolder}
+                  onChange={e => setOutputFolder(e.target.value)}
+                  placeholder="translated"
+                />
+              </div>
+
               <textarea
                 className="chapter-textarea"
                 placeholder="วางเนื้อหาต้นฉบับที่นี่..."
@@ -547,6 +645,12 @@ export default function App() {
                     </button>
                   </div>
                   <div className="result-text">{result.translation}</div>
+                  {result.output_file && (
+                    <button className="saved-file" onClick={() => openOutputFile(result.output_file)}>
+                      <span>บันทึกแล้ว</span>
+                      <strong>{result.output_file.relative_path}</strong>
+                    </button>
+                  )}
 
                   {result.summary && (
                     <div className="summary-box">
@@ -572,6 +676,52 @@ export default function App() {
                   )}
                 </div>
               )}
+
+              <div className="panel file-manager-panel">
+                <div className="panel-header">
+                  <h2>Output File Manager</h2>
+                  <button className="btn-ghost" onClick={fetchOutputFiles}>รีเฟรช</button>
+                </div>
+
+                {outputLoading ? (
+                  <div className="empty">กำลังโหลดไฟล์...</div>
+                ) : outputFiles.length === 0 ? (
+                  <div className="empty">ยังไม่มีไฟล์ output</div>
+                ) : (
+                  <div className="file-manager">
+                    <div className="folder-tree">
+                      {outputFiles.map(folder => (
+                        <div key={folder.name} className="file-folder">
+                          <div className="folder-title">📁 {folder.name}</div>
+                          {folder.files.length === 0 ? (
+                            <div className="file-empty">ว่าง</div>
+                          ) : folder.files.map(file => (
+                            <button
+                              key={file.relative_path}
+                              className={`file-row ${selectedOutput?.relative_path === file.relative_path ? "active" : ""}`}
+                              onClick={() => openOutputFile(file)}
+                            >
+                              <span>📄</span>
+                              <span className="file-name">{file.name}</span>
+                            </button>
+                          ))}
+                        </div>
+                      ))}
+                    </div>
+
+                    <div className="file-preview">
+                      {selectedOutput ? (
+                        <>
+                          <div className="file-preview-title">{selectedOutput.relative_path}</div>
+                          <pre>{selectedOutput.text}</pre>
+                        </>
+                      ) : (
+                        <div className="empty">เลือกไฟล์เพื่อดูผลลัพธ์</div>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
             </div>
           </div>
         )}
@@ -724,4 +874,12 @@ export default function App() {
       </main>
     </div>
   );
+}
+
+function loadSavedState() {
+  try {
+    return JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}");
+  } catch {
+    return {};
+  }
 }

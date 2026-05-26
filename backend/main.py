@@ -14,7 +14,7 @@ from typing import Optional
 
 from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, PlainTextResponse
 from pydantic import BaseModel
 
 from glossary_db import (
@@ -34,6 +34,7 @@ app.add_middleware(
 # ── In-memory job store ──────────────────────────────────────────────
 jobs: dict[str, dict] = {}  # job_id → {status, progress, logs, result}
 job_events: dict[str, asyncio.Queue] = {}
+OUTPUT_ROOT = Path(__file__).resolve().parent / "outputs"
 
 AGENT_STEPS = [
     {"id": "agent4", "name": "Context Manager",        "icon": "ti-database",       "order": 1},
@@ -51,6 +52,8 @@ class TranslateRequest(BaseModel):
     chapter_text: str
     chapter_num: int
     api_keys: list[str]
+    output_folder: str = "translated"
+    source_name: Optional[str] = None
 
 class GlossaryUpdateRequest(BaseModel):
     characters: dict[str, str] = {}
@@ -73,9 +76,50 @@ def push_event(job_id: str, event_type: str, data: dict):
             pass
 
 
+def safe_path_part(value: str, fallback: str = "translated") -> str:
+    value = (value or "").strip()
+    value = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", value)
+    value = re.sub(r"\s+", " ", value).strip(". ")
+    return value or fallback
+
+
+def save_translation_output(
+    chapter_num: int,
+    translation: str,
+    summary: str,
+    output_folder: str,
+    source_name: Optional[str] = None,
+) -> dict:
+    folder_name = safe_path_part(output_folder)
+    folder = OUTPUT_ROOT / folder_name
+    folder.mkdir(parents=True, exist_ok=True)
+
+    source_stem = safe_path_part(Path(source_name or "").stem, "")
+    suffix = f" - {source_stem}" if source_stem else ""
+    filename = f"chapter-{chapter_num:04d}{suffix}.txt"
+    path = folder / filename
+    content = translation.strip()
+    if summary.strip():
+        content = f"{content}\n\n---\nSummary:\n{summary.strip()}\n"
+    path.write_text(content, encoding="utf-8")
+    return {
+        "folder": folder_name,
+        "filename": filename,
+        "relative_path": f"{folder_name}/{filename}",
+        "size": path.stat().st_size,
+    }
+
+
 # ── Translation Job (runs in thread) ─────────────────────────────────
 
-def _run_translation_job(job_id: str, chapter_text: str, chapter_num: int, api_keys: list[str]):
+def _run_translation_job(
+    job_id: str,
+    chapter_text: str,
+    chapter_num: int,
+    api_keys: list[str],
+    output_folder: str,
+    source_name: Optional[str],
+):
     """Actual CrewAI pipeline execution (blocking — run in thread pool)"""
     import importlib, sys
 
@@ -228,15 +272,33 @@ def _run_translation_job(job_id: str, chapter_text: str, chapter_num: int, api_k
         tasks = [context_task, translate_task, glossary_task, style_task, tone_task, qa_task]
         agent_objs = [context_agent, translator_agent, glossary_agent, style_agent, tone_agent, qa_agent]
 
-        # Signal each agent as running
-        for i, step in enumerate(AGENT_STEPS):
-            push_event(job_id, "agent_running", {"agent_id": step["id"]})
+        task_index = {"value": 0}
+
+        def on_task_done(_task_output):
+            idx = task_index["value"]
+            if idx < len(AGENT_STEPS):
+                done_step = AGENT_STEPS[idx]
+                logs.append(f"[{done_step['name']}] เสร็จแล้ว")
+                push_event(job_id, "agent_done", {"agent_id": done_step["id"]})
+                push_event(job_id, "log", {"message": logs[-1]})
+            task_index["value"] += 1
+            if task_index["value"] < len(AGENT_STEPS):
+                next_step = AGENT_STEPS[task_index["value"]]
+                logs.append(f"[{next_step['name']}] กำลังทำงาน...")
+                push_event(job_id, "agent_running", {"agent_id": next_step["id"]})
+                push_event(job_id, "log", {"message": logs[-1]})
+
+        first_step = AGENT_STEPS[0]
+        logs.append(f"[{first_step['name']}] กำลังทำงาน...")
+        push_event(job_id, "agent_running", {"agent_id": first_step["id"]})
+        push_event(job_id, "log", {"message": logs[-1]})
 
         crew = Crew(
             agents=agent_objs,
             tasks=tasks,
             process=Process.sequential,
             verbose=False,
+            task_callback=on_task_done,
         )
 
         raw_result = manager.call_with_retry(crew.kickoff, agent_role=f"Chapter{chapter_num}")
@@ -284,8 +346,18 @@ def _run_translation_job(job_id: str, chapter_text: str, chapter_num: int, api_k
                 "failed_count": k.failed_count,
             })
 
-        for step in AGENT_STEPS:
-            push_event(job_id, "agent_done", {"agent_id": step["id"]})
+        for idx in range(task_index["value"], len(AGENT_STEPS)):
+            push_event(job_id, "agent_done", {"agent_id": AGENT_STEPS[idx]["id"]})
+
+        output_file = save_translation_output(
+            chapter_num=chapter_num,
+            translation=translation,
+            summary=summary,
+            output_folder=output_folder,
+            source_name=source_name,
+        )
+        logs.append(f"บันทึกไฟล์แล้ว: {output_file['relative_path']}")
+        push_event(job_id, "log", {"message": logs[-1]})
 
         jobs[job_id]["status"] = "done"
         jobs[job_id]["result"] = {
@@ -293,12 +365,14 @@ def _run_translation_job(job_id: str, chapter_text: str, chapter_num: int, api_k
             "summary": summary,
             "new_glossary": new_glossary_data,
             "key_status": key_status_final,
+            "output_file": output_file,
         }
         push_event(job_id, "done", {
             "translation": translation,
             "summary": summary,
             "new_glossary": new_glossary_data,
             "key_status": key_status_final,
+            "output_file": output_file,
         })
 
     except Exception as e:
@@ -331,6 +405,8 @@ async def start_translation(req: TranslateRequest, background_tasks: BackgroundT
         "result": None,
         "error": None,
         "chapter_num": req.chapter_num,
+        "output_folder": req.output_folder,
+        "source_name": req.source_name,
         "created_at": time.time(),
     }
     job_events[job_id] = asyncio.Queue(maxsize=500)
@@ -342,7 +418,9 @@ async def start_translation(req: TranslateRequest, background_tasks: BackgroundT
         executor,
         _run_translation_job,
         job_id, req.chapter_text, req.chapter_num,
-        [k.strip() for k in req.api_keys if k.strip()]
+        [k.strip() for k in req.api_keys if k.strip()],
+        req.output_folder,
+        req.source_name,
     )
 
     return {"job_id": job_id}
@@ -396,6 +474,34 @@ async def get_job_status(job_id: str):
         "error": job.get("error"),
         "logs": job.get("logs", []),
     }
+
+
+@app.get("/api/files")
+async def list_output_files():
+    OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
+    folders = []
+    for folder in sorted([p for p in OUTPUT_ROOT.iterdir() if p.is_dir()], key=lambda p: p.name.lower()):
+        files = []
+        for path in sorted(folder.glob("*"), key=lambda p: p.name.lower()):
+            if path.is_file():
+                files.append({
+                    "name": path.name,
+                    "relative_path": f"{folder.name}/{path.name}",
+                    "size": path.stat().st_size,
+                    "modified_at": path.stat().st_mtime,
+                })
+        folders.append({"name": folder.name, "files": files})
+    return {"root": str(OUTPUT_ROOT), "folders": folders}
+
+
+@app.get("/api/files/{folder}/{filename}")
+async def read_output_file(folder: str, filename: str):
+    folder_name = safe_path_part(folder)
+    file_name = safe_path_part(filename, "")
+    path = OUTPUT_ROOT / folder_name / file_name
+    if not path.exists() or not path.is_file():
+        raise HTTPException(404, "ไม่พบไฟล์")
+    return PlainTextResponse(path.read_text(encoding="utf-8"))
 
 
 # ── Glossary Routes ───────────────────────────────────────────────────
