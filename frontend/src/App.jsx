@@ -370,10 +370,14 @@ export default function App() {
 
   async function saveSourceFilesToServer(files) {
     const fd = new FormData();
-    files.forEach(file => {
-      fd.append("files", file);
-      fd.append("relative_paths", file.webkitRelativePath || file.name);
-    });
+    for (const file of files) {
+      const relativePath = file.webkitRelativePath || file.name;
+      const uploadFile = file instanceof File
+        ? file
+        : new File([await file.text()], file.name, { type: "text/plain" });
+      fd.append("files", uploadFile);
+      fd.append("relative_paths", relativePath);
+    }
     const r = await fetch(`${API_BASE}/api/source-files`, { method: "POST", body: fd });
     if (!r.ok) throw new Error(await r.text());
     const d = await r.json();
