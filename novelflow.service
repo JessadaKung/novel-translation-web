@@ -10,6 +10,9 @@ Environment="HOME=/var/www/novel-translation"
 Environment="XDG_CACHE_HOME=/var/www/novel-translation/.cache"
 Environment="XDG_CONFIG_HOME=/var/www/novel-translation/.config"
 Environment="XDG_DATA_HOME=/var/www/novel-translation/.local/share"
+Environment="NOVELFLOW_STORAGE_ROOT=/var/www/novel-files"
+Environment="NOVELFLOW_SOURCE_ROOT=/var/www/novel-files/originals"
+Environment="NOVELFLOW_OUTPUT_ROOT=/var/www/novel-files/outputs"
 ExecStart=/var/www/novel-translation/venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000 --workers 1
 Restart=always
 RestartSec=5
