@@ -12,7 +12,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks
+from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, PlainTextResponse
 from pydantic import BaseModel
@@ -34,7 +34,9 @@ app.add_middleware(
 # ── In-memory job store ──────────────────────────────────────────────
 jobs: dict[str, dict] = {}  # job_id → {status, progress, logs, result}
 job_events: dict[str, asyncio.Queue] = {}
-OUTPUT_ROOT = Path(__file__).resolve().parent / "outputs"
+STORAGE_ROOT = Path(os.environ.get("NOVELFLOW_STORAGE_ROOT", Path(__file__).resolve().parent))
+OUTPUT_ROOT = Path(os.environ.get("NOVELFLOW_OUTPUT_ROOT", STORAGE_ROOT / "outputs"))
+SOURCE_ROOT = Path(os.environ.get("NOVELFLOW_SOURCE_ROOT", STORAGE_ROOT / "originals"))
 
 AGENT_STEPS = [
     {"id": "agent4", "name": "Context Manager",        "icon": "ti-database",       "order": 1},
@@ -81,6 +83,38 @@ def safe_path_part(value: str, fallback: str = "translated") -> str:
     value = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", value)
     value = re.sub(r"\s+", " ", value).strip(". ")
     return value or fallback
+
+
+def safe_relative_path(value: str, fallback: str = "source.txt") -> Path:
+    parts = []
+    for part in Path(value or fallback).parts:
+        safe_part = safe_path_part(part, "")
+        if safe_part and safe_part not in (".", ".."):
+            parts.append(safe_part)
+    if not parts:
+        parts = [fallback]
+    return Path(*parts)
+
+
+def decode_text_file(content: bytes) -> str:
+    try:
+        return content.decode("utf-8")
+    except UnicodeDecodeError:
+        try:
+            return content.decode("utf-8-sig")
+        except Exception:
+            raise HTTPException(400, "ไม่สามารถอ่านไฟล์ได้ — รองรับเฉพาะ UTF-8")
+
+
+def save_source_file(content: bytes, relative_path: str) -> dict:
+    file_path = SOURCE_ROOT / safe_relative_path(relative_path)
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    file_path.write_bytes(content)
+    return {
+        "name": file_path.name,
+        "relative_path": str(file_path.relative_to(SOURCE_ROOT)).replace("\\", "/"),
+        "size": file_path.stat().st_size,
+    }
 
 
 def save_translation_output(
@@ -572,14 +606,23 @@ async def clear_glossary():
 @app.post("/api/upload")
 async def upload_file(file: UploadFile = File(...)):
     content = await file.read()
-    try:
-        text = content.decode("utf-8")
-    except UnicodeDecodeError:
-        try:
-            text = content.decode("utf-8-sig")
-        except Exception:
-            raise HTTPException(400, "ไม่สามารถอ่านไฟล์ได้ — รองรับเฉพาะ UTF-8")
-    return {"text": text, "filename": file.filename, "size": len(content)}
+    text = decode_text_file(content)
+    saved = save_source_file(content, file.filename or "source.txt")
+    return {"text": text, "filename": file.filename, "size": len(content), "saved": saved}
+
+
+@app.post("/api/source-files")
+async def upload_source_files(
+    files: list[UploadFile] = File(...),
+    relative_paths: list[str] = Form(default=[]),
+):
+    saved_files = []
+    for index, file in enumerate(files):
+        content = await file.read()
+        decode_text_file(content)
+        relative_path = relative_paths[index] if index < len(relative_paths) else (file.filename or f"source-{index + 1}.txt")
+        saved_files.append(save_source_file(content, relative_path))
+    return {"files": saved_files}
 
 
 # ── Key Status Route ──────────────────────────────────────────────────

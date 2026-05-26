@@ -355,12 +355,29 @@ export default function App() {
     saveBatchFilesToDb(loaded).catch(e => {
       setLogs(l => [...l, `⚠️ บันทึกรายการไฟล์ไว้ใช้ต่อหลัง reload ไม่ได้: ${e.message}`]);
     });
+    saveSourceFilesToServer(selected).then(count => {
+      if (count) setLogs(l => [...l, `☁️ บันทึกต้นฉบับบน server แล้ว ${count} ไฟล์`]);
+    }).catch(e => {
+      setLogs(l => [...l, `⚠️ บันทึกต้นฉบับขึ้น server ไม่ได้: ${e.message}`]);
+    });
     if (loaded[0]) {
       setChapterText(loaded[0].text);
       setLogs(l => [...l, `📁 โหลด${sourceLabel}สำเร็จ ${loaded.length} ไฟล์ เริ่มจากตอนที่ ${firstChapter}`]);
     } else {
       setLogs(l => [...l, `⚠️ ไม่พบไฟล์ .txt หรือ .md ใน${sourceLabel}`]);
     }
+  }
+
+  async function saveSourceFilesToServer(files) {
+    const fd = new FormData();
+    files.forEach(file => {
+      fd.append("files", file);
+      fd.append("relative_paths", file.webkitRelativePath || file.name);
+    });
+    const r = await fetch(`${API_BASE}/api/source-files`, { method: "POST", body: fd });
+    if (!r.ok) throw new Error(await r.text());
+    const d = await r.json();
+    return d.files?.length || 0;
   }
 
   async function handleUploadSelection(files) {
